@@ -88,7 +88,8 @@ python -m pyserini.index.lucene \
   --output splade_results.txt \
   --batch 36 --threads 32 \
   --hits 1000 \
-  --impact
+  --impact --pretokenized
+
 ```
 
 #### Evaluate SPLADE with pyserini
@@ -103,7 +104,7 @@ python -m pyserini.eval.trec_eval -c -M 10 -m recip_rank msmarco-passage-dev-sub
 ### BEIR eval
 #### Encode documents and queries
 ```bash
-dataset=nfcorpus
+dataset=scifact
 mkdir -p encoding_splade/${dataset}/corpus
 mkdir -p encoding_splade/${dataset}/query
 
@@ -136,8 +137,6 @@ CUDA_VISIBLE_DEVICES=0 python encode_splade.py \
   --encode_output_path encoding_splade/${dataset}/query/query.tsv
 ```
 
-
-
 #### Index SPLADE with pyserini
 ```bash
 python -m pyserini.index.lucene \
@@ -156,21 +155,16 @@ python -m pyserini.search.lucene \
   --index splade_pyserini_index_beir/${dataset} \
   --topics encoding_splade/${dataset}/query/query.tsv \
   --output splade_results_${dataset}.txt \
-  --output-format msmarco \
   --batch 36 --threads 32 \
   --hits 1000 \
-  --impact
+  --impact --pretokenized --remove-query
   
-python convert_result_to_trec.py \
-    --input splade_results_${dataset}.txt \
-    --output splade_results_${dataset}.trec \
-    --remove_query
 ```
 
 #### Evaluate SPLADE with pyserini
 
 ```bash
-python -m pyserini.eval.trec_eval -c -mrecall.100 -mndcg_cut.10 beir-v1.0.0-${dataset}-test splade_results_${dataset}.trec
+python -m pyserini.eval.trec_eval -c -mrecall.100 -mndcg_cut.10 beir-v1.0.0-${dataset}-test splade_results_${dataset}.txt
 
 # recall_100              all     0.9153
 # ndcg_cut_10             all     0.6864
