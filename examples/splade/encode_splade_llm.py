@@ -53,10 +53,10 @@ class SpladeEncodeCollator(EncodeCollator):
 
         if self.data_args.query_suffix:
             query_suffix = self.data_args.query_suffix.replace("\\n", "\n")
-            collated_inputs['input_ids'] = [x + self.tokenizer.encode(query_suffix) for x in collated_inputs['input_ids']]
+            collated_inputs['input_ids'] = [x + self.tokenizer.encode(query_suffix, add_special_tokens=False) for x in collated_inputs['input_ids']]
 
         if self.data_args.passage_suffix:
-            collated_inputs['input_ids'] = [x + self.tokenizer.encode(query_suffix) for x in collated_inputs['input_ids']]
+            collated_inputs['input_ids'] = [x + self.tokenizer.encode(query_suffix, add_special_tokens=False) for x in collated_inputs['input_ids']]
 
 
         collated_inputs = self.tokenizer.pad(
@@ -133,7 +133,7 @@ def main():
     vocab_dict = tokenizer.get_vocab()
     vocab_dict = {v: k for k, v in vocab_dict.items()}
     collection_file = open(data_args.encode_output_path, "w")
-
+    unk_token_id = 0
     for (batch_ids, batch) in tqdm(encode_loader):
         lookup_indices.extend(batch_ids)
         with torch.cuda.amp.autocast() if training_args.fp16 else nullcontext():
@@ -154,6 +154,10 @@ def main():
                     dict_splade = dict()
                     for id_token, value_token in zip(idx[0],data):
                         if value_token > 0:
+                            if id_token not in vocab_dict:
+                                print("unknown token id =>", id_token)
+                                vocab_dict[id_token] = f'<|unknown_token_{unk_token_id}|>'
+                                unk_token_id += 1
                             real_token = vocab_dict[id_token]
                             dict_splade[real_token] = int(value_token)
                     if len(dict_splade.keys()) == 0:

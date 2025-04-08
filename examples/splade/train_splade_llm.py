@@ -1,8 +1,10 @@
 import logging
 import os
 import sys
+from typing import Dict
 
 import torch
+from torch import Tensor
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from transformers import (
     HfArgumentParser,
@@ -11,6 +13,7 @@ from transformers import (
 from dataclasses import dataclass, field
 from tevatron.retriever.arguments import ModelArguments, DataArguments, TevatronTrainingArguments
 from tevatron.retriever.modeling import SpladeModel
+from tevatron.retriever.modeling.encoder import EncoderOutput
 from tevatron.retriever.trainer import TevatronTrainer
 
 
@@ -26,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 class SpladeLlmModel(SpladeModel):
     TRANSFORMER_CLS = AutoModelForCausalLM
+    TOPK=256
 
     def encode_query(self, qry):
         qry_out = self.encoder(**qry, return_dict=True).logits
@@ -40,6 +44,58 @@ class SpladeLlmModel(SpladeModel):
         reps = torch.log(1 + torch.relu(reps))
 
         return reps
+
+    def topk_token_mask(self, reps, topk=32):
+        topk_values, topk_indices = torch.topk(reps, topk, dim=1)
+        mask = torch.zeros_like(reps, dtype=torch.bool)
+
+        # Scatter True at the top-k indices
+        mask.scatter_(1, topk_indices, 1)
+        reps = reps * mask.float()
+        return reps
+
+    def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None):
+        q_reps = self.encode_query(query) if query else None
+        p_reps = self.encode_passage(passage) if passage else None
+
+        if q_reps is not None and self.TOPK is not None:
+            q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
+        if p_reps is not None and self.TOPK is not None:
+            p_reps = self.topk_token_mask(p_reps, topk=self.TOPK)
+
+        # for inference
+        if q_reps is None or p_reps is None:
+            return EncoderOutput(
+                q_reps=q_reps,
+                p_reps=p_reps
+            )
+
+
+        # for training
+        if self.training:
+            if self.is_ddp:
+                q_reps = self._dist_gather_tensor(q_reps)
+                p_reps = self._dist_gather_tensor(p_reps)
+
+            scores = self.compute_similarity(q_reps, p_reps)
+            scores = scores.view(q_reps.size(0), -1)
+
+            target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+            target = target * (p_reps.size(0) // q_reps.size(0))
+
+            loss = self.compute_loss(scores / self.temperature, target)
+            if self.is_ddp:
+                loss = loss * self.world_size  # counter average weight reduction
+        # for eval
+        else:
+            scores = self.compute_similarity(q_reps, p_reps)
+            loss = None
+        return EncoderOutput(
+            loss=loss,
+            scores=scores,
+            q_reps=q_reps,
+            p_reps=p_reps,
+        )
 
 
 @dataclass
@@ -77,11 +133,11 @@ class SpladeTrainCollator(TrainCollator):
 
         if self.data_args.query_suffix:
             query_suffix = self.data_args.query_suffix.replace("\\n", "\n")
-            q_collated['input_ids'] = [q + self.tokenizer.encode(query_suffix) for q in q_collated['input_ids']]
+            q_collated['input_ids'] = [q + self.tokenizer.encode(query_suffix, add_special_tokens=False) for q in q_collated['input_ids']]
 
         if self.data_args.passage_suffix:
             passage_suffix = self.data_args.passage_suffix.replace("\\n", "\n")
-            d_collated['input_ids'] = [d + self.tokenizer.encode(passage_suffix) for d in d_collated['input_ids']]
+            d_collated['input_ids'] = [d + self.tokenizer.encode(passage_suffix, add_special_tokens=False) for d in d_collated['input_ids']]
 
 
         q_collated = self.tokenizer.pad(
@@ -123,13 +179,18 @@ class SpladeTrainer(TevatronTrainer):
         return torch.sum(torch.mean(torch.abs(inputs), dim=0) ** 2)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+
+        if self.state.global_step / self.state.max_steps > 0.1 and model.TOPK is None:
+            model.TOPK = 256
+
         query, passage = inputs
         output = model(query=query, passage=passage)
         q_reps = output.q_reps
         p_reps = output.p_reps
         loss = output.loss
-        q_flops_loss = self.args.q_flops_loss_factor*self._flops(q_reps)
-        p_flops_loss = self.args.p_flops_loss_factor*self._flops(p_reps)
+
+        q_flops_loss = self.args.q_flops_loss_factor*self._flops(q_reps) if self.args.q_flops_loss_factor != 0 else 0
+        p_flops_loss = self.args.p_flops_loss_factor*self._flops(p_reps) if self.args.p_flops_loss_factor != 0 else 0
         if self.is_ddp:
             q_flops_loss *= self._dist_loss_scale_factor
             p_flops_loss *= self._dist_loss_scale_factor
