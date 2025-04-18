@@ -48,8 +48,6 @@ class SpladeEncodeCollator(EncodeCollator):
             return_token_type_ids=False,
             add_special_tokens=True,
         )
-        if self.data_args.append_eos_token:
-            collated_inputs['input_ids'] = [x + [self.tokenizer.eos_token_id] for x in collated_inputs['input_ids']]
 
         if self.data_args.query_suffix:
             query_suffix = self.data_args.query_suffix.replace("\\n", "\n")
@@ -58,6 +56,8 @@ class SpladeEncodeCollator(EncodeCollator):
         if self.data_args.passage_suffix:
             collated_inputs['input_ids'] = [x + self.tokenizer.encode(query_suffix, add_special_tokens=False) for x in collated_inputs['input_ids']]
 
+        if self.data_args.append_eos_token and not self.data_args.encode_is_query:
+            collated_inputs['input_ids'] = [x + [self.tokenizer.eos_token_id] for x in collated_inputs['input_ids']]
 
         collated_inputs = self.tokenizer.pad(
             collated_inputs,
@@ -89,12 +89,6 @@ def main():
         level=logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN,
     )
 
-    num_labels = 1
-    config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
-        num_labels=num_labels,
-        cache_dir=model_args.cache_dir,
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -105,10 +99,14 @@ def main():
     tokenizer.padding_side = 'right'
 
     model = SpladeLlmModel.load(
-        model_name_or_path=model_args.model_name_or_path,
-        config=config,
+        model_args.model_name_or_path,
+        pooling=model_args.pooling,
+        normalize=model_args.normalize,
+        lora_name_or_path=model_args.lora_name_or_path,
         cache_dir=model_args.cache_dir,
+        attn_implementation=model_args.attn_implementation,
     )
+    #model.TOPK = 256
     encode_dataset = EncodeDataset(
         data_args=data_args,
     )
@@ -150,7 +148,7 @@ def main():
                     idx = np.nonzero(rep)
                     # then extract values:
                     data = rep[idx]
-                    data = np.rint(data * 100).astype(int)
+                    data = np.rint(data * 100).astype(int) #if not data_args.encode_is_query else np.rint(data * 1).astype(int)
                     dict_splade = dict()
                     for id_token, value_token in zip(idx[0],data):
                         if value_token > 0:

@@ -2,9 +2,11 @@ import logging
 import os
 import sys
 from typing import Dict
+from uu import encode
 
 import torch
 from torch import Tensor
+from torchvision.io import encode_png
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from transformers import (
     HfArgumentParser,
@@ -29,18 +31,29 @@ logger = logging.getLogger(__name__)
 
 class SpladeLlmModel(SpladeModel):
     TRANSFORMER_CLS = AutoModelForCausalLM
-    TOPK=256
+    TOPK=None
 
     def encode_query(self, qry):
-        qry_out = self.encoder(**qry, return_dict=True).logits
+        # reps = torch.zeros((qry['input_ids'].shape[0], self.encoder.vocab_size),
+        #                    dtype=self.encoder.dtype,
+        #                    device=qry['input_ids'].device)
+        # sequence_lengths = qry['attention_mask'].sum(dim=1)
+        # for i, length in enumerate(sequence_lengths):
+        #     reps[i][qry['input_ids'][i][:length]] = 1
+        # return reps
+        return self.encode_passage(qry)
 
-        left_padding = (qry['attention_mask'][:, -1].sum() == qry['attention_mask'].shape[0])
+
+    def encode_passage(self, passage):
+        passage_out = self.encoder(**passage, return_dict=True).logits
+
+        left_padding = (passage['attention_mask'][:, -1].sum() == passage['attention_mask'].shape[0])
         if left_padding:
-            reps = qry_out[:, -1]
+            reps = passage_out[:, -1]
         else:
-            sequence_lengths = qry['attention_mask'].sum(dim=1) - 1
-            batch_size = qry_out.shape[0]
-            reps = qry_out[torch.arange(batch_size, device=qry_out.device), sequence_lengths]
+            sequence_lengths = passage['attention_mask'].sum(dim=1) - 1
+            batch_size = passage_out.shape[0]
+            reps = passage_out[torch.arange(batch_size, device=passage_out.device), sequence_lengths]
         reps = torch.log(1 + torch.relu(reps))
 
         return reps
@@ -58,8 +71,8 @@ class SpladeLlmModel(SpladeModel):
         q_reps = self.encode_query(query) if query else None
         p_reps = self.encode_passage(passage) if passage else None
 
-        if q_reps is not None and self.TOPK is not None:
-            q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
+        # if q_reps is not None and self.TOPK is not None:
+        #     q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
         if p_reps is not None and self.TOPK is not None:
             p_reps = self.topk_token_mask(p_reps, topk=self.TOPK)
 
@@ -139,6 +152,9 @@ class SpladeTrainCollator(TrainCollator):
             passage_suffix = self.data_args.passage_suffix.replace("\\n", "\n")
             d_collated['input_ids'] = [d + self.tokenizer.encode(passage_suffix, add_special_tokens=False) for d in d_collated['input_ids']]
 
+        if self.data_args.append_eos_token:
+            d_collated['input_ids'] = [d + [self.tokenizer.eos_token_id] for d in d_collated['input_ids']]
+
 
         q_collated = self.tokenizer.pad(
             q_collated,
@@ -180,8 +196,8 @@ class SpladeTrainer(TevatronTrainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
 
-        if self.state.global_step / self.state.max_steps > 0.1 and model.TOPK is None:
-            model.TOPK = 256
+        # if self.state.global_step / self.state.max_steps > 0.1 and model.TOPK is None:
+        #     model.TOPK = 256
 
         query, passage = inputs
         output = model(query=query, passage=passage)
