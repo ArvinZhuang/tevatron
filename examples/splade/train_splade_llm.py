@@ -1,10 +1,11 @@
 import logging
 import os
 import sys
-from typing import Dict
+from typing import Dict, Optional
 from uu import encode
 
 import torch
+from pygments.lexer import default
 from torch import Tensor
 from torchvision.io import encode_png
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
@@ -71,8 +72,8 @@ class SpladeLlmModel(SpladeModel):
         q_reps = self.encode_query(query) if query else None
         p_reps = self.encode_passage(passage) if passage else None
 
-        # if q_reps is not None and self.TOPK is not None:
-        #     q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
+        if q_reps is not None and self.TOPK is not None:
+            q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
         if p_reps is not None and self.TOPK is not None:
             p_reps = self.topk_token_mask(p_reps, topk=self.TOPK)
 
@@ -176,7 +177,7 @@ class SpladeTrainCollator(TrainCollator):
 class SpladeTrainingArguments(TevatronTrainingArguments):
     q_flops_loss_factor: float = field(default=4)
     p_flops_loss_factor: float = field(default=32)
-
+    topk: Optional[int] = field(default=None)
 
 @dataclass
 class SpladeDataArguments(DataArguments):

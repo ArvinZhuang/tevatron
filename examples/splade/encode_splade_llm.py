@@ -16,12 +16,11 @@ from transformers import (
     HfArgumentParser,
 )
 from dataclasses import dataclass, field
-from tevatron.retriever.arguments import ModelArguments, DataArguments, \
-    TevatronTrainingArguments as TrainingArguments
+from tevatron.retriever.arguments import ModelArguments
 from tevatron.retriever.dataset import EncodeDataset
 from tevatron.retriever.collator import EncodeCollator
 from tevatron.retriever.modeling import EncoderOutput
-from train_splade_llm import SpladeDataArguments, SpladeLlmModel
+from train_splade_llm import SpladeDataArguments, SpladeLlmModel, SpladeTrainingArguments as TrainingArguments
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ def main():
         cache_dir=model_args.cache_dir,
         attn_implementation=model_args.attn_implementation,
     )
-    #model.TOPK = 256
+    model.TOPK = training_args.topk
     encode_dataset = EncodeDataset(
         data_args=data_args,
     )
