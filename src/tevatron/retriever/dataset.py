@@ -53,7 +53,7 @@ class TrainDataset(Dataset):
                 cache_dir=self.data_args.dataset_cache_dir,
                 num_proc=self.data_args.num_proc,
             )
-        
+
         # for video we use assets_path to load the video
         self.corpus_assets_path = corpus_assets_path if corpus_assets_path is not None else self.data_args.assets_path
 
@@ -63,7 +63,6 @@ class TrainDataset(Dataset):
             corpus_ids = self.corpus.select_columns(['docid'])
             docids = corpus_ids['docid']
             self.docid_to_index = {docid: index for index, docid in enumerate(tqdm(docids))}
-
 
     def set_trainer(self, trainer):
         """Sets the trainer for the dataset."""
@@ -87,7 +86,9 @@ class TrainDataset(Dataset):
             video = os.path.join(self.corpus_assets_path, video)
 
         audio = document_info.get('audio', None)
+
         if audio is not None: # either an dict with 'array' key or a string .mp3 path
+
             if isinstance(audio, dict) and 'array' in audio:
                 audio = audio['array']
             else:
@@ -144,6 +145,7 @@ class TrainDataset(Dataset):
                 negative_text = (negative['title'] + ' ' + negative['text']
                                  if 'title' in negative else negative['text'])
                 formatted_documents.append((self.data_args.passage_prefix + negative_text, None, None, None))
+
 
             return formatted_query, formatted_documents
 
@@ -300,7 +302,6 @@ class EncodeDataset(Dataset):
             content_video = content.get('video', None)
             content_audio = content.get('audio', None)
 
-
         if content_video is not None and self.data_args.encode_video:
             content_video = os.path.join(self.data_args.assets_path, content_video)
             # check if the file exists
@@ -308,7 +309,7 @@ class EncodeDataset(Dataset):
                 logger.warning(f"Video file {content_video} does not exist.")
                 content_video = None
 
-        if content_audio is not None: # either an dict with 'array' key or a string .mp3 path
+        if content_audio is not None:  # either an dict with 'array' key or a string .mp3 path
             if isinstance(content_audio, dict) and 'array' in content_audio:
                 content_audio = content_audio['array']
             else:
@@ -327,5 +328,6 @@ class EncodeDataset(Dataset):
             content_video = None
         if not self.data_args.encode_audio:
             content_audio = None
-
+            
         return content_id, content_text, content_image, content_video, content_audio
+
