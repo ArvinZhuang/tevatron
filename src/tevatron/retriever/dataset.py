@@ -86,7 +86,9 @@ class TrainDataset(Dataset):
             video = os.path.join(self.corpus_assets_path, video)
 
         audio = document_info.get('audio', None)
-        if audio is not None:  # either an dict with 'array' key or a string .mp3 path
+
+        if audio is not None: # either an dict with 'array' key or a string .mp3 path
+
             if isinstance(audio, dict) and 'array' in audio:
                 audio = audio['array']
             else:
@@ -143,6 +145,7 @@ class TrainDataset(Dataset):
                 negative_text = (negative['title'] + ' ' + negative['text']
                                  if 'title' in negative else negative['text'])
                 formatted_documents.append((self.data_args.passage_prefix + negative_text, None, None, None))
+
 
             return formatted_query, formatted_documents
 
@@ -325,5 +328,6 @@ class EncodeDataset(Dataset):
             content_video = None
         if not self.data_args.encode_audio:
             content_audio = None
-
+            
         return content_id, content_text, content_image, content_video, content_audio
+
