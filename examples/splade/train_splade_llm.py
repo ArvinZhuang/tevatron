@@ -1,8 +1,10 @@
 import logging
 import os
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from uu import encode
+import yaml
+
 
 import torch
 from pygments.lexer import default
@@ -22,8 +24,9 @@ from tevatron.retriever.trainer import TevatronTrainer
 
 from tevatron.retriever.arguments import ModelArguments, DataArguments, \
     TevatronTrainingArguments as TrainingArguments
-from tevatron.retriever.dataset import TrainDataset
+from tevatron.retriever.dataset import TrainDataset, MultiTrainDataset
 from tevatron.retriever.collator import TrainCollator
+
 
 from tevatron.retriever.trainer import TevatronTrainer as Trainer
 
@@ -32,7 +35,21 @@ logger = logging.getLogger(__name__)
 
 class SpladeLlmModel(SpladeModel):
     TRANSFORMER_CLS = AutoModelForCausalLM
-    TOPK=None
+
+    def __init__(self, topks: List[int] = None,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.topks = topks
+        self.weights = None
+
+    def set_topks(self, topks: List[int]):
+        self.topks = topks
+        # sort topks in descending order
+        self.topks.sort(reverse=True)
+        # set weights for each topk, decreasing, sum to 1
+        self.weights = list(range(len(self.topks) + 1, 0, -1))
+        self.weights = [w / sum(self.weights) for w in self.weights]
+
 
     def encode_query(self, qry):
         # reps = torch.zeros((qry['input_ids'].shape[0], self.encoder.vocab_size),
@@ -59,8 +76,7 @@ class SpladeLlmModel(SpladeModel):
 
         return reps
 
-    def topk_token_mask(self, reps, topk=32):
-        topk_values, topk_indices = torch.topk(reps, topk, dim=1)
+    def _topk_token_mask(self, reps, topk_indices):
         mask = torch.zeros_like(reps, dtype=torch.bool)
 
         # Scatter True at the top-k indices
@@ -71,11 +87,6 @@ class SpladeLlmModel(SpladeModel):
     def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None):
         q_reps = self.encode_query(query) if query else None
         p_reps = self.encode_passage(passage) if passage else None
-
-        if q_reps is not None and self.TOPK is not None:
-            q_reps = self.topk_token_mask(q_reps, topk=self.TOPK)
-        if p_reps is not None and self.TOPK is not None:
-            p_reps = self.topk_token_mask(p_reps, topk=self.TOPK)
 
         # for inference
         if q_reps is None or p_reps is None:
@@ -98,6 +109,27 @@ class SpladeLlmModel(SpladeModel):
             target = target * (p_reps.size(0) // q_reps.size(0))
 
             loss = self.compute_loss(scores / self.temperature, target)
+
+            if self.topks is not None:
+                max_topk = self.topks[0]
+                if q_reps is not None:
+                    _, max_q_topk_indices = torch.topk(q_reps, max_topk, dim=1)
+                    q_reps = self._topk_token_mask(q_reps, max_q_topk_indices)
+                if p_reps is not None:
+                    _, max_p_topk_indices = torch.topk(p_reps, max_topk, dim=1)
+                    p_reps = self._topk_token_mask(p_reps, max_p_topk_indices)
+
+                for weight, topk in zip(self.weights, self.topks):
+                    q_reps = self._topk_token_mask(q_reps, max_q_topk_indices[:, :topk])
+                    p_reps = self._topk_token_mask(p_reps, max_p_topk_indices[:, :topk])
+                    scores = self.compute_similarity(q_reps, p_reps)
+                    scores = scores.view(q_reps.size(0), -1)
+
+                    target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+                    target = target * (p_reps.size(0) // q_reps.size(0))
+                    topk_loss = self.compute_loss(scores / self.temperature, target) * weight
+                    loss = loss + topk_loss
+
             if self.is_ddp:
                 loss = loss * self.world_size  # counter average weight reduction
         # for eval
@@ -147,15 +179,16 @@ class SpladeTrainCollator(TrainCollator):
 
         if self.data_args.query_suffix:
             query_suffix = self.data_args.query_suffix.replace("\\n", "\n")
-            q_collated['input_ids'] = [q + self.tokenizer.encode(query_suffix, add_special_tokens=False) for q in q_collated['input_ids']]
+            query_suffix_ids = self.tokenizer.encode(query_suffix, add_special_tokens=False)
+            q_collated['input_ids'] = [q + query_suffix_ids for q in q_collated['input_ids']]
 
         if self.data_args.passage_suffix:
             passage_suffix = self.data_args.passage_suffix.replace("\\n", "\n")
-            d_collated['input_ids'] = [d + self.tokenizer.encode(passage_suffix, add_special_tokens=False) for d in d_collated['input_ids']]
+            passage_suffix_ids = self.tokenizer.encode(passage_suffix, add_special_tokens=False)
+            d_collated['input_ids'] = [d + passage_suffix_ids for d in d_collated['input_ids']]
 
         if self.data_args.append_eos_token:
             d_collated['input_ids'] = [d + [self.tokenizer.eos_token_id] for d in d_collated['input_ids']]
-
 
         q_collated = self.tokenizer.pad(
             q_collated,
@@ -177,7 +210,7 @@ class SpladeTrainCollator(TrainCollator):
 class SpladeTrainingArguments(TevatronTrainingArguments):
     q_flops_loss_factor: float = field(default=4)
     p_flops_loss_factor: float = field(default=32)
-    topk: Optional[int] = field(default=None)
+    topks: List[int] = field(default=None)
 
 @dataclass
 class SpladeDataArguments(DataArguments):
@@ -272,7 +305,15 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
-    train_dataset = TrainDataset(data_args)
+    model.set_topks(training_args.topks)
+
+    if data_args.train_yaml is not None:
+        with open(data_args.train_yaml, 'r') as f:
+            train_yaml = yaml.safe_load(f)
+        dataset_list = train_yaml['train']
+        corpus_list = train_yaml['corpus']
+
+    train_dataset = MultiTrainDataset(data_args, dataset_list, corpus_list) if data_args.train_yaml is not None else TrainDataset(data_args)
     collator = SpladeTrainCollator(data_args, tokenizer)
 
     trainer = SpladeTrainer(
@@ -281,7 +322,8 @@ def main():
         train_dataset=train_dataset,
         data_collator=collator
     )
-    train_dataset.trainer = trainer
+
+    train_dataset.set_trainer(trainer)
 
     trainer.train()  # TODO: resume training
     trainer.save_model()
