@@ -7,9 +7,7 @@ import yaml
 
 
 import torch
-from pygments.lexer import default
 from torch import Tensor
-from torchvision.io import encode_png
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from transformers import (
     HfArgumentParser,
@@ -65,16 +63,23 @@ class SpladeLlmModel(SpladeModel):
     def encode_passage(self, passage):
         passage_out = self.encoder(**passage, return_dict=True).logits
 
-        left_padding = (passage['attention_mask'][:, -1].sum() == passage['attention_mask'].shape[0])
-        if left_padding:
-            reps = passage_out[:, -1]
+        if self.pooling in ('eos', 'last'):
+            left_padding = (passage['attention_mask'][:, -1].sum() == passage['attention_mask'].shape[0])
+            if left_padding:
+                reps = passage_out[:, -1]
+            else:
+                sequence_lengths = passage['attention_mask'].sum(dim=1) - 1
+                batch_size = passage_out.shape[0]
+                reps = passage_out[torch.arange(batch_size, device=passage_out.device), sequence_lengths]
+            reps = torch.log(1 + torch.relu(reps))
+        elif self.pooling == 'max':
+            passage_out = self.encoder(**passage, return_dict=True).logits
+            reps, _ = torch.max(torch.log(1 + torch.relu(passage_out)) * passage['attention_mask'].unsqueeze(-1),
+                                              dim=1)
         else:
-            sequence_lengths = passage['attention_mask'].sum(dim=1) - 1
-            batch_size = passage_out.shape[0]
-            reps = passage_out[torch.arange(batch_size, device=passage_out.device), sequence_lengths]
-        reps = torch.log(1 + torch.relu(reps))
-
+            raise ValueError(f"Pooling method {self.pooling} not supported")
         return reps
+
 
     def _topk_token_mask(self, reps, topk_indices):
         mask = torch.zeros_like(reps, dtype=torch.bool)
@@ -90,6 +95,32 @@ class SpladeLlmModel(SpladeModel):
 
         # for inference
         if q_reps is None or p_reps is None:
+            reps = []
+            if q_reps is not None:
+                reps.append(q_reps.clone())
+            if p_reps is not None:
+                reps.append(p_reps.clone())
+
+            if self.topks is not None:
+                max_topk = self.topks[0]
+                if q_reps is not None:
+                    _, max_q_topk_indices = torch.topk(q_reps, max_topk, dim=1)
+                    q_reps = self._topk_token_mask(q_reps, max_q_topk_indices)
+                if p_reps is not None:
+                    _, max_p_topk_indices = torch.topk(p_reps, max_topk, dim=1)
+                    p_reps = self._topk_token_mask(p_reps, max_p_topk_indices)
+
+                for topk in self.topks:
+                    if q_reps is not None:
+                        q_reps = self._topk_token_mask(q_reps, max_q_topk_indices[:, :topk])
+                        reps.append(q_reps.clone())
+                    if p_reps is not None:
+                        p_reps = self._topk_token_mask(p_reps, max_p_topk_indices[:, :topk])
+                        reps.append(p_reps.clone())
+
+            q_reps = reps if q_reps is not None else None
+            p_reps = reps if p_reps is not None else None
+
             return EncoderOutput(
                 q_reps=q_reps,
                 p_reps=p_reps
@@ -239,8 +270,16 @@ class SpladeTrainer(TevatronTrainer):
         p_reps = output.p_reps
         loss = output.loss
 
+
+        # q_flops_loss_factor_coeff = self.state.global_step / 4000 if self.state.global_step < 4000 else 1
+        # p_flops_loss_factor_coeff = self.state.global_step / 4000 if self.state.global_step < 4000 else 1
+
         q_flops_loss = self.args.q_flops_loss_factor*self._flops(q_reps) if self.args.q_flops_loss_factor != 0 else 0
         p_flops_loss = self.args.p_flops_loss_factor*self._flops(p_reps) if self.args.p_flops_loss_factor != 0 else 0
+
+        # q_flops_loss = q_flops_loss * q_flops_loss_factor_coeff
+        # p_flops_loss = p_flops_loss * p_flops_loss_factor_coeff
+
         if self.is_ddp:
             q_flops_loss *= self._dist_loss_scale_factor
             p_flops_loss *= self._dist_loss_scale_factor
@@ -305,7 +344,8 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
-    model.set_topks(training_args.topks)
+    if training_args.topks is not None:
+        model.set_topks(training_args.topks)
 
     if data_args.train_yaml is not None:
         with open(data_args.train_yaml, 'r') as f:

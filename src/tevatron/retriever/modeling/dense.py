@@ -1,6 +1,6 @@
 import torch
 import logging
-from transformers import Qwen2_5OmniThinkerForConditionalGeneration
+# from transformers import Qwen2_5OmniThinkerForConditionalGeneration
 from .encoder import EncoderModel
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class DenseModel(EncoderModel):
 
 
 class MultiModalDenseModel(DenseModel):
-    TRANSFORMER_CLS = Qwen2_5OmniThinkerForConditionalGeneration
+    # TRANSFORMER_CLS = Qwen2_5OmniThinkerForConditionalGeneration
 
     def __init__(self, encoder, pooling='eos', normalize=True, temperature=0.02):
         super().__init__(encoder, pooling, normalize, temperature)
