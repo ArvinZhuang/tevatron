@@ -10,7 +10,11 @@ with open(args.input) as f_in, open(args.output, 'w') as f_out:
     cur_qid = None
     rank = 0
     for line in f_in:
-        qid, docid, score = line.split()
+        try:
+            qid, docid, score = line.split()
+        except ValueError:
+            print(f"Skipping malformed line: {line.strip()}")
+            continue
         if cur_qid != qid:
             cur_qid = qid
             rank = 0
